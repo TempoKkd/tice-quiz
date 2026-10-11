@@ -6,13 +6,14 @@
 'use strict';
 
 /* ---------------- 持久化 ---------------- */
-const LS = { q: 'tice_questions_v1', w: 'tice_wrong_v1', r: 'tice_records_v1' };
+const LS = { q: 'tice_questions_v1', w: 'tice_wrong_v1', r: 'tice_records_v1', m: 'tice_recite_v1' };
 function load(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch (e) { return d; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 存储满等异常忽略 */ } }
 
 let questions = load(LS.q, []);                 // 题库
 let wrongBook = load(LS.w, {});                 // 错题本: id -> {c:错误次数, t:最近时间}
 let records = load(LS.r, { answered: 0, correct: 0, lastImport: null });
+let reciteState = load(LS.m, { type: 'all', pos: { all: 0, single: 0, multiple: 0, judge: 0 }, fp: '' }); // 背题进度
 
 /* ---------------- 常量与工具 ---------------- */
 const TYPE = {
@@ -456,6 +457,7 @@ const ICONS = {
   list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1.2" fill="currentColor" stroke="none"/></svg>',
   spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.2 2.2M16.2 16.2l2.2 2.2M18.4 5.6l-2.2 2.2M7.8 16.2l-2.2 2.2"/></svg>',
   read: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2Z"/><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7Z"/></svg>',
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9 21v-6h6v6"/></svg>',
   filter: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16l-6 8v5l-4 2v-7Z"/></svg>',
   sort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3"/></svg>',
   hash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 3 7 21M17 3l-2 18M4 8h17M3 16h17"/></svg>',
@@ -500,7 +502,7 @@ function renderHome() {
 
     ${n ? `<div class="action-grid">
       <button class="card action-card" data-action="goto" data-view="practice"><div class="action-icon ai-blue">${ICONS.pen}</div><div class="action-name">开始练习</div><div class="action-desc">逐题作答，即时反馈答案与解析</div></button>
-      <button class="card action-card" data-action="goto" data-view="recite"><div class="action-icon ai-green">${ICONS.read}</div><div class="action-name">背题模式</div><div class="action-desc">答案直接展示，快速通览记忆</div></button>
+      <button class="card action-card" data-action="goto" data-view="recite"><div class="action-icon ai-green">${ICONS.read}</div><div class="action-name">背题模式</div><div class="action-desc">逐题背记答案，自动记住上次进度</div></button>
       <button class="card action-card" data-action="goto" data-view="exam"><div class="action-icon ai-amber">${ICONS.timer}</div><div class="action-name">模拟考试</div><div class="action-desc">限时作答，交卷后统一评分</div></button>
       <button class="card action-card" data-action="goto" data-view="wrong"><div class="action-icon ai-red">${ICONS.book}</div><div class="action-name">错题复习</div><div class="action-desc">${wrongCount() ? `还有 ${wrongCount()} 道错题待攻克` : '当前没有错题'}</div></button>
       <button class="card action-card" data-action="goto" data-view="import"><div class="action-icon ai-teal">${ICONS.upload}</div><div class="action-name">继续导入</div><div class="action-desc">追加新的表格题目到题库</div></button>
@@ -757,44 +759,110 @@ function renderResult() {
   }));
 }
 
-/* ---------------- 背题模式 ---------------- */
-const reciteState = { type: 'all', hide: false, revealed: new Set() };
+/* ---------------- 背题模式（逐题 + 进度记录） ---------------- */
+const RECITE_TYPES = ['all', 'single', 'multiple', 'judge'];
+function reciteList() {
+  return questions.filter(q => reciteState.type === 'all' || q.type === reciteState.type);
+}
+function reciteFP() {
+  return questions.map(fingerprint).join('|');
+}
+function ensureReciteShape() {
+  if (!RECITE_TYPES.includes(reciteState.type)) reciteState.type = 'all';
+  if (!reciteState.pos || typeof reciteState.pos !== 'object') reciteState.pos = { all: 0, single: 0, multiple: 0, judge: 0 };
+  RECITE_TYPES.forEach(t => { reciteState.pos[t] = Math.max(0, Number(reciteState.pos[t]) || 0); });
+}
+function restoreRecitePos() {
+  ensureReciteShape();
+  const saved = load(LS.m, null);
+  if (saved && saved.fp === reciteFP()) {
+    if (RECITE_TYPES.includes(saved.type)) reciteState.type = saved.type;
+    if (saved.pos && typeof saved.pos === 'object') {
+      RECITE_TYPES.forEach(t => { reciteState.pos[t] = Math.max(0, Number(saved.pos[t]) || 0); });
+    }
+  } else {
+    reciteState.pos = { all: 0, single: 0, multiple: 0, judge: 0 };
+  }
+  const list = reciteList();
+  reciteState.pos[reciteState.type] = Math.min(reciteState.pos[reciteState.type], Math.max(0, list.length - 1));
+}
+function saveRecitePos() {
+  ensureReciteShape();
+  const list = reciteList();
+  save(LS.m, { type: reciteState.type, pos: reciteState.pos, fp: reciteFP(), total: list.length, lastAt: Date.now() });
+}
+
+function recitePrev() {
+  const t = reciteState.type;
+  if (reciteState.pos[t] > 0) { reciteState.pos[t]--; saveRecitePos(); renderRecite(); }
+}
+function reciteNext() {
+  const list = reciteList();
+  const t = reciteState.type;
+  if (reciteState.pos[t] < list.length - 1) { reciteState.pos[t]++; saveRecitePos(); renderRecite(); }
+}
+function reciteFinish() {
+  toast('本轮背题完成，已重置到第 1 题', 'ok');
+  reciteState.pos[reciteState.type] = 0;
+  saveRecitePos();
+  renderRecite();
+}
+
 function renderRecite() {
-  const list = questions.filter(q => reciteState.type === 'all' || q.type === reciteState.type);
+  restoreRecitePos();
+  const list = reciteList();
   const chip = (v, label) => `<button class="chip ${reciteState.type === v ? 'on' : ''}" data-action="recite-type" data-val="${v}">${label}</button>`;
 
   view().innerHTML = `
-    <div class="page-head"><div class="page-title">背题模式</div><div class="page-sub">所有答案直接展示，也可遮住答案自测，点击即可揭示</div></div>
+    <div class="page-head"><div class="page-title">背题模式</div><div class="page-sub">逐题记忆答案与解析，自动记录上次背到第几题</div></div>
     ${questions.length ? `
       <div class="list-head">
         ${chip('all', `全部 ${questions.length}`)}${chip('single', `单选 ${byType('single')}`)}${chip('multiple', `多选 ${byType('multiple')}`)}${chip('judge', `判断 ${byType('judge')}`)}
         <span style="flex:1"></span>
-        <button class="btn ${reciteState.hide ? 'btn-accent' : 'btn-ghost'} btn-sm" data-action="recite-toggle">${reciteState.hide ? '显示全部答案' : '遮住答案自测'}</button>
+        <button class="btn btn-ghost btn-sm" data-action="recite-reset">重置进度</button>
       </div>
-      <div class="count-note" style="margin-bottom:12px">共 ${list.length} 题${reciteState.hide ? ' · 已遮住答案，点击卡片底部揭示' : ''}</div>
-      ${list.map((q, i) => {
-        const hidden = reciteState.hide && !reciteState.revealed.has(q.id);
-        return `<div class="card recite-card">
-          <div class="q-meta">
-            <span class="recite-num">${String(i + 1).padStart(2, '0')}</span>
-            ${badge(q.type)}
-            ${hidden ? '' : `<span class="recite-ans">答案：${esc(answerText(q))}</span>`}
-          </div>
-          <div class="q-stem" style="font-size:17px">${esc(q.question)}</div>
-          <div class="opts">${q.options.map(o => `
-            <div class="opt static ${q.type === 'judge' ? 'judge' : ''} ${!hidden && q.answer.includes(o.key) ? 'correct' : ''}">
-              <span class="opt-key">${optChip(q, o.key)}</span>
-              <span class="opt-text">${esc(o.text)}</span>
-            </div>`).join('')}</div>
-          ${hidden
-            ? `<button class="ans-mask" data-action="recite-reveal" data-id="${q.id}">答案已遮住 · 点击显示</button>`
-            : (q.analysis ? `<div class="rv-ana"><b>解析：</b>${esc(q.analysis)}</div>` : '')}
-        </div>`;
-      }).join('')}`
-    : emptyState('题库还是空的', '导入题目后，即可在背题模式下通览全部题目与答案',
+      <div class="quiz-wrap">
+        ${renderReciteCard(list)}
+      </div>`
+    : emptyState('题库还是空的', '导入题目后，即可开始逐题背记',
       `<button class="btn btn-accent" data-action="goto" data-view="import">去导入</button>
        <button class="btn btn-ghost" data-action="load-sample">加载示例题目</button>`)}
   `;
+}
+
+function renderReciteCard(list) {
+  if (!list.length) return `<div class="card empty anim-in"><div class="empty-title" style="font-size:18px">该题型下暂无题目</div></div>`;
+  const t = reciteState.type;
+  const i = Math.max(0, Math.min(reciteState.pos[t], list.length - 1));
+  const q = list[i];
+  const isFirst = i === 0, isLast = i === list.length - 1;
+
+  return `
+    <div class="quiz-top" style="margin-bottom:12px">
+      <div class="quiz-exit" data-action="goto" data-view="home">${ICONS.home} 概览</div>
+      <div class="quiz-prog">
+        <div class="quiz-prog-text"><span>${q.type === 'judge' ? '判断' : TYPE[q.type].short} · 第 ${i + 1} / ${list.length} 题</span><span>${Math.round((i + 1) / list.length * 100)}%</span></div>
+        <div class="pbar"><i style="width:${(i + 1) / list.length * 100}%"></i></div>
+      </div>
+    </div>
+    <div class="card qcard anim-in">
+      <div class="q-meta">${badge(q.type)}<span class="src">${q.type === 'judge' ? '对 / 错' : '选项 ' + q.options.map(o => o.key).join(' · ')}</span></div>
+      <div class="q-stem">${esc(q.question)}</div>
+      <div class="opts" style="margin-top:22px">
+        ${q.options.map(o => `
+          <div class="opt static ${q.type === 'judge' ? 'judge' : ''} ${q.answer.includes(o.key) ? 'correct' : ''}">
+            <span class="opt-key">${optChip(q, o.key)}</span>
+            <span class="opt-text">${esc(o.text)}</span>
+            ${q.answer.includes(o.key) ? '<span class="recite-ok-tag">正确答案</span>' : ''}
+          </div>`).join('')}
+      </div>
+      ${q.analysis ? `<div class="rv-ana" style="margin-top:20px"><b>解析</b>${esc(q.analysis)}</div>` : ''}
+    </div>
+    <div class="recite-actions">
+      <button class="btn btn-ghost" data-action="recite-prev" ${isFirst ? 'disabled' : ''}>上一题</button>
+      <button class="btn ${isLast ? 'btn-ghost' : 'btn-accent'}" data-action="recite-next" ${isLast ? 'disabled' : ''}>下一题</button>
+      ${isLast ? `<button class="btn btn-accent" data-action="recite-finish">完成背题</button>` : ''}
+    </div>`;
 }
 
 /* ---------------- 错题本 ---------------- */
@@ -984,12 +1052,18 @@ view().addEventListener('click', async e => {
       break;
     }
 
-    case 'recite-type': reciteState.type = el.dataset.val; renderRecite(); break;
-    case 'recite-toggle':
-      reciteState.hide = !reciteState.hide;
-      reciteState.revealed.clear();
+    case 'recite-type':
+      reciteState.type = el.dataset.val;
+      saveRecitePos();
       renderRecite(); break;
-    case 'recite-reveal': reciteState.revealed.add(el.dataset.id); renderRecite(); break;
+    case 'recite-prev': recitePrev(); break;
+    case 'recite-next': reciteNext(); break;
+    case 'recite-finish': reciteFinish(); break;
+    case 'recite-reset': {
+      const ok = await confirmDlg({ title: '重置背题进度？', body: '将回到当前题型的第 1 题重新开始背。', okText: '重置' });
+      if (ok) { reciteState.pos[reciteState.type] = 0; saveRecitePos(); renderRecite(); }
+      break;
+    }
 
     case 'mng-type': manageState.type = el.dataset.val; renderManage(); break;
     case 'mng-del': {
@@ -1015,10 +1089,16 @@ view().addEventListener('click', async e => {
   }
 });
 
-/* 键盘快捷键：答题页 A~H 选择、Enter 下一步 */
+/* 键盘快捷键：答题页 A~H 选择、Enter 下一步；背题页 ←/→ 翻题 */
 window.addEventListener('keydown', e => {
-  if (currentView !== 'quiz' || !session) return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (currentView === 'recite') {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); recitePrev(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); reciteNext(); }
+    else if (e.key === 'Enter') { e.preventDefault(); reciteNext(); }
+    return;
+  }
+  if (currentView !== 'quiz' || !session) return;
   const k = e.key.toUpperCase();
   const q = session.list[session.idx];
   const i = OPT_KEYS.indexOf(k);
@@ -1031,5 +1111,12 @@ window.addEventListener('keydown', e => {
     else practiceNext();
   }
 });
+
+/* PWA：注册离线缓存（file:// 直接打开时跳过） */
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
 
 render();

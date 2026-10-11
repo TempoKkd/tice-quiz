@@ -343,6 +343,8 @@ input,select{font-family:inherit;font-size:inherit;color:inherit}
 .recite-card{padding:22px 24px;margin-bottom:14px}
 .recite-num{font-family:var(--serif);font-weight:900;font-size:15px;color:var(--ink2)}
 .recite-ans{font-size:12.5px;color:var(--green);font-weight:700}
+.recite-ok-tag{margin-left:auto;font-size:13px;color:var(--green);font-weight:700;white-space:nowrap}
+.recite-actions{display:flex;justify-content:center;gap:14px;margin-top:20px;flex-wrap:wrap}
 .opt.static{cursor:default}
 .opt.static:not(.correct):hover{border-color:var(--line);transform:none}
 .opt.static.correct:hover{border-color:var(--green);transform:none}
@@ -377,6 +379,15 @@ input,select{font-family:inherit;font-size:inherit;color:inherit}
   .q-stem{font-size:18px}
   .quiz-top{flex-wrap:wrap}
   .modal{padding:22px}
+}
+
+/* ---------- PWA / 安卓全屏 ---------- */
+@media (display-mode:standalone){
+  .side{padding-top:calc(12px + env(safe-area-inset-top))}
+  .main{padding-bottom:calc(60px + env(safe-area-inset-bottom))}
+}
+@media (max-width:900px){
+  .main{padding-bottom:calc(50px + env(safe-area-inset-bottom))}
 }
 
 /* ---------- 减少动效 ---------- */
